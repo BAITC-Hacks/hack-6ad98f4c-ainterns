@@ -2,16 +2,18 @@
 
 ```mermaid
 flowchart LR
-    E[data/edges.parquet] --> P[src/pipeline.py]
-    N[data/nodes.parquet] --> P
-    T[data/transactions.parquet] --> P
-    P --> R[output/nodes_roles.csv]
-    P --> C[output/clusters.csv]
-    P --> TOP[output/top_nodes.csv]
-    E --> UI[src/app.py]
-    R --> UI
+    N[data/nodes.parquet] --> M[Метрики узлов и связей]
+    E[data/edges.parquet] --> M
+    T[data/transactions.parquet] --> M
+    M --> A[Роли · кластеры · приоритет]
+    A --> R[output/nodes_roles.csv]
+    A --> C[output/clusters.csv]
+    A --> TOP[output/top_nodes.csv]
+    R --> UI[src/app.py · интерфейс]
     C --> UI
     TOP --> UI
+    E --> UI
+    N --> UI
 ```
 
 ## Контракт файлов
