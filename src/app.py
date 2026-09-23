@@ -16,6 +16,10 @@ ROLE_COLORS = {
     "source": "#168aad", "bridge": "#2a9d8f", "normal": "#718096",
     "unknown": "#94a3b8",
 }
+CLUSTER_COLORS = [
+    "#4cc9f0", "#f72585", "#4895ef", "#fca311", "#43aa8b",
+    "#b5179e", "#90be6d", "#577590", "#f9844a", "#277da1",
+]
 
 st.set_page_config(page_title="Граф денег · AML", page_icon="◉", layout="wide")
 st.markdown("""<style>
@@ -23,6 +27,8 @@ st.markdown("""<style>
 html, body, [class*="css"] {font-family:Manrope, sans-serif;}
 .block-container {padding-top:1.4rem; max-width:1500px;}
 [data-testid="stMetric"] {background:#111d2b;padding:14px 18px;border:1px solid #263648;border-radius:12px;}
+[data-testid="stMetricLabel"] {white-space:normal !important; overflow:visible !important; line-height:1.2;}
+[data-testid="stMetricValue"] {font-size:1.9rem;}
 [data-testid="stSidebar"] {background:#0b1420;}
 .small-muted {color:#8fa2b7;font-size:.88rem;}
 .pill {display:inline-block;padding:4px 10px;border-radius:100px;background:#203247;color:#c7d7e6;font-size:.8rem;}
@@ -60,6 +66,13 @@ def gid_key(value):
     except (InvalidOperation, ValueError):
         pass
     return text
+
+
+def cluster_color(value):
+    try:
+        return CLUSTER_COLORS[int(Decimal(gid_key(value))) % len(CLUSTER_COLORS)]
+    except (InvalidOperation, ValueError, TypeError):
+        return CLUSTER_COLORS[0]
 
 
 def fmt(value):
@@ -126,6 +139,7 @@ def draw_graph(nodes, edges, selected_gid, gid_col, role_col, title="Ближа�
     for gid in keep:
         row = node_map.get(gid, {})
         role = str(row.get(role_col, "unknown")) if role_col else "unknown"
+        cluster = row.get("cluster_id", "")
         role_key = role.lower()
         color = next((v for k, v in ROLE_COLORS.items() if k in role_key), ROLE_COLORS["unknown"])
         payload_nodes.append({"id": gid, "label": gid, "color": color,
@@ -166,8 +180,9 @@ def draw_graph(nodes, edges, selected_gid, gid_col, role_col, title="Ближа�
             continue
         fig.add_trace(go.Scatter(x=[positions[g][0] for g in ids], y=[positions[g][1] for g in ids],
             mode="markers+text", text=ids, textposition="top center", name=role_name,
-            marker={"size":[32 if g == selected else 19 for g in ids], "color":color,
-                    "line":{"width":[4 if g == selected else 1 for g in ids], "color":"#f4bd50"}},
+                marker={"size":[32 if g == selected else 19 for g in ids], "color":color,
+                    "line":{"width":[4 if g == selected else 2 for g in ids],
+                        "color":["#f4bd50" if g == selected else cluster_color(node_map[g].get("cluster_id", "")) for g in ids]}},
             customdata=[str(node_map[g].get(role_col,"unknown")) if role_col and g in node_map else "unknown" for g in ids],
             hovertemplate="gid %{text}<br>роль %{customdata}<extra></extra>"))
     fig.update_layout(title=title, height=430, paper_bgcolor="#0c1724", plot_bgcolor="#0c1724",
@@ -273,7 +288,7 @@ row = nodes.loc[nodes[gid_col].map(gid_key) == selected_gid].iloc[0]
 left, right = st.columns([1.55, 1])
 with left:
     st.subheader("Окрестность узла")
-    st.caption("Стрелка показывает направление потока; размер визуализации ограничен ближайшими связями.")
+    st.caption("Стрелка показывает направление потока. Заливка узла — роль, обводка — кластер.")
     edges_path = DATA / "edges.parquet"
     try:
         edges = pd.read_parquet(edges_path) if edges_path.exists() else pd.DataFrame()
