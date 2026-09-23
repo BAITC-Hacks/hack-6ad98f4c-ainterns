@@ -256,7 +256,7 @@ def _classify(row: dict) -> tuple[str, float, str]:
     if role == "transit":
         additions.append(
             f"быстрый транзит {int(row['fast_transit_count'])} "
-            f"(доля {float(row['fast_transit_share']):.2f})"
+            f"(доля {float(row['fast_transit_share']):.2f}, дата +1)"
         )
     for addition in additions:
         candidate = evidence + "; " + addition
