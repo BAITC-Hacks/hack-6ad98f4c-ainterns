@@ -436,11 +436,11 @@ with overview_right:
         top_chart = top_chart.sort_values("priority_score", ascending=True)
         top_fig = go.Figure(go.Bar(
             x=top_chart["priority_score"],
-            y=top_chart["gid"],
+            y=[f"gid {gid}" for gid in top_chart["gid"]],
             orientation="h",
             marker_color=[ROLE_COLORS.get(str(role), ROLE_COLORS["unknown"]) for role in top_chart["role"]],
-            customdata=top_chart[["role"]],
-            hovertemplate="GID: %{y}<br>Роль: %{customdata[0]}<br>Приоритет: %{x:.3f}<extra></extra>",
+            customdata=top_chart[["gid", "role"]],
+            hovertemplate="GID: %{customdata[0]}<br>Роль: %{customdata[1]}<br>Приоритет: %{x:.3f}<extra></extra>",
         ))
         top_fig.update_layout(title="Топ-20 по приоритету", xaxis_title="Priority score (0–1)",
                               yaxis_title="GID", height=330, margin={"l": 10, "r": 25, "t": 55, "b": 35},
@@ -472,7 +472,7 @@ if clusters_schema_ok:
     cm1, cm2, cm3 = st.columns(3)
     cm1.metric("Узлов в кластере", fmt(selected_cluster_row["n_nodes"]))
     cm2.metric("Seed", fmt(selected_cluster_row["n_seed"]))
-    cm3.metric("Внутренний оборот, KZT", fmt(selected_cluster_row["sum_kzt_internal"]))
+    cm3.metric("Оборот KZT", fmt(selected_cluster_row["sum_kzt_internal"]))
     st.info(f"Гипотеза: {selected_cluster_row['hypothesis']}")
 
 all_gids = nodes[gid_col].map(gid_key).tolist()
@@ -652,7 +652,7 @@ if pd.notna(row[cluster_col]):
             m1, m2, m3 = st.columns(3)
             m1.metric("Узлов", fmt(info["n_nodes"]))
             m2.metric("Seed", fmt(info["n_seed"]))
-            m3.metric("Внутренний оборот, KZT", fmt(info["sum_kzt_internal"]))
+            m3.metric("Оборот KZT", fmt(info["sum_kzt_internal"]))
             st.markdown("**Гипотеза для проверки по кластеру**")
             st.write(info["hypothesis"])
             gids = parse_top_gids(info["top_gids"])
