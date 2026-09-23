@@ -19,6 +19,44 @@ def _find_column(frame: pd.DataFrame, names: tuple[str, ...]) -> str | None:
     return next((name for name in names if name in frame.columns), None)
 
 
+def _fast_transit_features(
+    gids: pd.Series, transactions: pd.DataFrame
+) -> tuple[pd.Series, pd.Series]:
+    """Count outgoing transactions with an incoming transaction on the prior date.
+
+    The source data has date-only precision. A transaction on the immediately
+    following calendar date is necessarily later and less than 48 hours later;
+    same-day ordering and events two dates apart cannot be established, so are
+    excluded. This is a conservative date-level signal, not a money trace.
+    """
+    counts = pd.Series(0, index=gids.index, dtype="int64")
+    shares = pd.Series(0.0, index=gids.index, dtype="float64")
+    src_col = _find_column(transactions, ("src", "sender", "sender_gid", "from_gid"))
+    dst_col = _find_column(transactions, ("dst", "receiver", "receiver_gid", "to_gid"))
+    date_col = _find_column(transactions, ("date", "timestamp", "datetime", "created_at"))
+    if not (src_col and dst_col and date_col) or transactions.empty:
+        return counts, shares
+
+    dates = pd.to_datetime(transactions[date_col], errors="coerce").dt.normalize()
+    valid = transactions[src_col].notna() & transactions[dst_col].notna() & dates.notna()
+    in_dates: dict[object, set[pd.Timestamp]] = {}
+    out_dates: dict[object, list[pd.Timestamp]] = {}
+    for sender, receiver, date in zip(
+        transactions.loc[valid, src_col], transactions.loc[valid, dst_col], dates.loc[valid]
+    ):
+        in_dates.setdefault(receiver, set()).add(date)
+        out_dates.setdefault(sender, []).append(date)
+
+    for pos, gid in enumerate(gids):
+        outgoing = out_dates.get(gid, [])
+        if outgoing:
+            previous_day_incoming = in_dates.get(gid, set())
+            fast = sum((date - pd.Timedelta(days=1)) in previous_day_incoming for date in outgoing)
+            counts.iloc[pos] = fast
+            shares.iloc[pos] = fast / len(outgoing)
+    return counts, shares
+
+
 def compute_node_features(
     nodes: pd.DataFrame, edges: pd.DataFrame, transactions: pd.DataFrame
 ) -> pd.DataFrame:
@@ -103,6 +141,9 @@ def compute_node_features(
     result["pass_ratio"] = result["flow_ratio"].fillna(0.0)
     result["neighbor_count"] = result["in_degree"] + result["out_degree"]
     result["truncated_by_depth"] = result["depth"].eq(4) & result["out_degree"].eq(0)
+    result["fast_transit_count"], result["fast_transit_share"] = _fast_transit_features(
+        gids, transactions
+    )
     result["role"], result["role_score"], result["evidence"] = zip(*[
         _classify(row) for row in result.to_dict(orient="records")
     ]) if len(result) else ([], [], [])
@@ -148,4 +189,9 @@ def _classify(row: dict) -> tuple[str, float, str]:
         f"{role}: вход. рёбер {ind}, исход. {out}; суммы {ia:.2f}/{oa:.2f} KZT; "
         f"транзакций {tx:g}, depth {depth_text}, seed={'да' if seed else 'нет'}"
     )
+    if role == "transit":
+        evidence += (
+            f"; быстрый транзит {int(row['fast_transit_count'])} "
+            f"(доля {float(row['fast_transit_share']):.2f}, дата +1)"
+        )
     return role, score, evidence[:200]
