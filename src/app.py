@@ -155,6 +155,66 @@ def esc(value):
             .replace(">", "&gt;").replace('"', "&quot;"))
 
 
+def draw_sankey(nodes, edges, selected_gid, gid_col, role_col, seed_path=None, limit=8):
+    """Show the largest observed incoming/outgoing flows around one node."""
+    src_col = col(edges, ["src", "source", "from_gid"])
+    dst_col = col(edges, ["dst", "target", "to_gid"])
+    amount_col = col(edges, ["sum_kzt", "amount", "weight"])
+    tx_col = col(edges, ["n_tx", "tx_count", "transactions"])
+    if not src_col or not dst_col or not amount_col:
+        st.info("Поток недоступен: нужны src, dst и sum_kzt.")
+        return
+    selected = gid_key(selected_gid)
+    incoming = edges[edges[dst_col].map(gid_key) == selected].copy()
+    outgoing = edges[edges[src_col].map(gid_key) == selected].copy()
+    incoming = incoming.assign(_gid=incoming[src_col].map(gid_key)).sort_values(amount_col, ascending=False).head(limit)
+    outgoing = outgoing.assign(_gid=outgoing[dst_col].map(gid_key)).sort_values(amount_col, ascending=False).head(limit)
+    flow_edges = pd.concat([incoming, outgoing], ignore_index=True)
+    if flow_edges.empty:
+        st.info("У выбранного узла нет наблюдаемых входящих или исходящих потоков.")
+        return
+    node_records = {gid_key(row[gid_col]): row for row in nodes.to_dict(orient="records")}
+    ordered = [gid_key(value) for value in incoming["_gid"].tolist()] + [selected] + [gid_key(value) for value in outgoing["_gid"].tolist()]
+    ordered = list(dict.fromkeys(ordered))
+    index = {gid: position for position, gid in enumerate(ordered)}
+    labels = ["Выбранный узел\n" + selected if gid == selected else gid for gid in ordered]
+    colors = []
+    for gid in ordered:
+        role = str(node_records.get(gid, {}).get(role_col, "unknown"))
+        colors.append(ROLE_COLORS.get(role, ROLE_COLORS["unknown"]))
+    path_edges = set(zip(seed_path, seed_path[1:])) if seed_path and len(seed_path) > 1 else set()
+    sources, targets, values, link_colors, customdata = [], [], [], [], []
+    for edge in flow_edges.to_dict(orient="records"):
+        source = gid_key(edge[src_col])
+        target = gid_key(edge[dst_col])
+        sources.append(index[source])
+        targets.append(index[target])
+        values.append(float(edge[amount_col]))
+        link_colors.append("#ff6b35" if (source, target) in path_edges else "rgba(110, 164, 193, 0.55)")
+        customdata.append([
+            f"{source} → {target}",
+            fmt(edge[amount_col]),
+            fmt(edge.get(tx_col)) if tx_col else "не указано",
+        ])
+    fig = go.Figure(go.Sankey(
+        arrangement="snap",
+        node={"label": labels, "color": colors, "pad": 18, "thickness": 22,
+              "line": {"color": "#dbe7f2", "width": 0.5}},
+        link={"source": sources, "target": targets, "value": values, "color": link_colors,
+              "customdata": customdata,
+              "hovertemplate": "%{customdata[0]}<br>Наблюдаемая сумма: %{customdata[1]} KZT<br>Транзакций: %{customdata[2]}<extra></extra>"},
+    ))
+    fig.update_layout(
+        title="Наблюдаемый поток вокруг узла",
+        height=470,
+        paper_bgcolor="#0c1724",
+        font={"color": "#dbe7f2", "size": 12},
+        margin={"l": 10, "r": 10, "t": 55, "b": 20},
+    )
+    st.plotly_chart(fig, width="stretch", config={"displayModeBar": True, "displaylogo": False})
+    st.caption(f"Показаны до {limit} крупнейших входящих и исходящих потоков. Ширина потока соответствует наблюдаемой сумме KZT; оранжевый — seed-path.")
+
+
 def draw_graph(nodes, edges, selected_gid, gid_col, role_col, title="Ближайшие связи",
                selected_neighborhood=True, include_all_nodes=False, seed_path=None,
                neighborhood_steps=1):
@@ -168,6 +228,7 @@ def draw_graph(nodes, edges, selected_gid, gid_col, role_col, title="Ближа�
     src_keys = edges[src_col].map(gid_key)
     dst_keys = edges[dst_col].map(gid_key)
     relevant = neighborhood_frame(edges, src_col, dst_col, selected, neighborhood_steps) if selected_neighborhood else edges.copy()
+    original_edge_count = len(relevant)
     if selected_neighborhood and len(relevant) > 80:
         amount_col = col(relevant, ["sum_kzt", "amount", "weight"])
         relevant = relevant.assign(_rank=pd.to_numeric(relevant[amount_col], errors="coerce").fillna(0) if amount_col else 0).nlargest(80, "_rank")
@@ -257,6 +318,8 @@ def draw_graph(nodes, edges, selected_gid, gid_col, role_col, title="Ближа�
             "responsive": True,
         },
     )
+    if original_edge_count > len(relevant):
+        st.caption(f"Для читаемости показаны {len(relevant)} из {original_edge_count} рёбер, выбранных по радиусу и сумме.")
 
 st.title("Граф денег")
 st.caption("Локальная рабочая панель AML-аналитика · признаки и гипотезы для проверки")
@@ -466,7 +529,8 @@ with left:
     st.subheader("Направленное окружение")
     st.caption(f"Выбранный узел {selected_gid} · кластер {gid_key(row[cluster_col])}")
     neighborhood_steps = st.radio("Радиус окружения", [1, 2], horizontal=True, format_func=lambda value: f"{value} шаг" if value == 1 else f"{value} шага", key="neighborhood_steps")
-    st.caption("Колесо мыши — масштаб · перетаскивание — перемещение · двойной щелчок — сброс. Наведите курсор на узел или сумму, чтобы увидеть подробности.")
+    graph_view = st.radio("Представление потока", ["Поток", "Топология"], horizontal=True, key="graph_view")
+    st.caption("Радиус считается по входящим и исходящим соседям; стрелки всегда показывают направление src → dst.")
     legend = "&nbsp;&nbsp;".join(
         f'<span style="color:{color}">●</span> {esc(role)}'
         for role, color in ROLE_COLORS.items() if role != "unknown"
@@ -488,9 +552,13 @@ with left:
         else:
             st.success(f"Seed {seed} → {' → '.join(seed_path)} · {len(seed_path) - 1} рёбер. Путь выделен оранжевым.")
     if edges_valid:
-        draw_graph(nodes, edges, selected_gid, gid_col, role_col,
-                   "Ближайшие связи и путь от seed", seed_path=seed_path,
-                   neighborhood_steps=neighborhood_steps)
+        if graph_view == "Поток":
+            draw_sankey(nodes, edges, selected_gid, gid_col, role_col, seed_path=seed_path)
+        else:
+            st.caption("Колесо мыши — масштаб · перетаскивание — перемещение · двойной щелчок — сброс.")
+            draw_graph(nodes, edges, selected_gid, gid_col, role_col,
+                       "Ближайшие связи и путь от seed", seed_path=seed_path,
+                       neighborhood_steps=neighborhood_steps)
 
 with right:
     role_text = str(row[role_col])
@@ -519,9 +587,9 @@ with right:
                 result["Транзакций"] = frame[tx_col].map(fmt).values
             return result
         st.markdown("**Входящие связи**")
-        st.dataframe(edge_table(incoming, edge_src).head(8), hide_index=True, width="stretch", height=190)
+        st.dataframe(edge_table(incoming.sort_values(edge_amount, ascending=False), edge_src).head(8), hide_index=True, width="stretch", height=190)
         st.markdown("**Исходящие связи**")
-        st.dataframe(edge_table(outgoing, edge_dst).head(8), hide_index=True, width="stretch", height=190)
+        st.dataframe(edge_table(outgoing.sort_values(edge_amount, ascending=False), edge_dst).head(8), hide_index=True, width="stretch", height=190)
         flow_left, flow_right = st.columns(2)
         for holder, frame, other, title, color in (
             (flow_left, incoming, edge_src, "От кого получил", "#4cc9f0"),
@@ -567,6 +635,10 @@ with right:
                                            margin={"l": 10, "r": 15, "t": 50, "b": 35})
                 st.plotly_chart(activity_fig, width="stretch", config={"displayModeBar": False})
                 st.caption("Активность показывает видимые операции по датам, а не остаток или полный баланс.")
+            else:
+                st.info("У выбранного узла нет наблюдаемой активности по дням.")
+        else:
+            st.warning("Для активности нужны колонки src, dst, date и sum_kzt в transactions.parquet.")
 
 if pd.notna(row[cluster_col]):
     st.divider()
