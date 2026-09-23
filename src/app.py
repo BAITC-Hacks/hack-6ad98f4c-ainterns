@@ -2,6 +2,7 @@
 from pathlib import Path
 import math
 import json
+from decimal import Decimal, InvalidOperation
 
 import pandas as pd
 import streamlit as st
@@ -33,7 +34,8 @@ def load_csv(name):
     if not path.exists():
         return pd.DataFrame()
     try:
-        return pd.read_csv(path)
+        # Large gids must stay strings; float parsing turns them into scientific notation.
+        return pd.read_csv(path, dtype=str, keep_default_na=False)
     except Exception as exc:
         st.error(f"Не удалось прочитать {path}: {exc}")
         return pd.DataFrame()
@@ -44,6 +46,20 @@ def col(df, candidates, default=None):
         if name in df.columns:
             return name
     return default
+
+
+def gid_key(value):
+    """Return one stable textual representation for large numeric gids."""
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return ""
+    text = str(value).strip()
+    try:
+        number = Decimal(text)
+        if number == number.to_integral_value():
+            return str(number.quantize(Decimal("1")))
+    except (InvalidOperation, ValueError):
+        pass
+    return text
 
 
 def fmt(value):
@@ -83,22 +99,27 @@ def esc(value):
 
 
 def draw_graph(nodes, edges, selected_gid, gid_col, role_col, title="Ближайшие связи"):
+    nodes = nodes.copy()
+    edges = edges.copy()
     gid_col = col(nodes, ["gid", "node", "id"])
     src_col = col(edges, ["src", "source", "from_gid"])
     dst_col = col(edges, ["dst", "target", "to_gid"])
     if not src_col or not dst_col:
         st.error("В data/edges.parquet не найдены обязательные колонки src и dst.")
         return
-    selected = str(selected_gid)
-    relevant = edges[(edges[src_col].astype(str) == selected) | (edges[dst_col].astype(str) == selected)].copy()
-    node_map = {str(r[gid_col]): r for _, r in nodes.iterrows()}
-    neighbor_ids = set(relevant[src_col].astype(str)) | set(relevant[dst_col].astype(str))
+    nodes[gid_col] = nodes[gid_col].map(gid_key)
+    edges[src_col] = edges[src_col].map(gid_key)
+    edges[dst_col] = edges[dst_col].map(gid_key)
+    selected = gid_key(selected_gid)
+    relevant = edges[(edges[src_col] == selected) | (edges[dst_col] == selected)].copy()
+    node_map = {r[gid_col]: r for _, r in nodes.iterrows()}
+    neighbor_ids = set(relevant[src_col]) | set(relevant[dst_col])
     keep = {selected} | neighbor_ids
     # Cap visual clutter without changing the loaded data or adjacency shown in the card.
     if len(relevant) > 80:
         amount_col = col(relevant, ["sum_kzt", "amount", "weight"])
         relevant = relevant.assign(_rank=pd.to_numeric(relevant[amount_col], errors="coerce").fillna(0) if amount_col else 0).nlargest(80, "_rank")
-        keep = {selected} | set(relevant[src_col].astype(str)) | set(relevant[dst_col].astype(str))
+        keep = {selected} | set(relevant[src_col]) | set(relevant[dst_col])
     amount_col = col(relevant, ["sum_kzt", "amount", "weight"])
     tx_col = col(relevant, ["n_tx", "tx_count", "transactions"])
     payload_nodes = []
@@ -201,7 +222,7 @@ with st.sidebar:
     else:
         st.info("top_nodes.csv отсутствует или пуст: топ-лист недоступен.")
 
-all_gids = nodes[gid_col].astype(str).tolist()
+all_gids = nodes[gid_col].map(gid_key).tolist()
 default_gid = search.strip() if search.strip() in set(all_gids) else (all_gids[0] if all_gids else "")
 if search.strip() and search.strip() not in set(all_gids):
     st.warning("Такой gid не найден в nodes_roles.csv.")
@@ -209,7 +230,7 @@ if not all_gids:
     st.error("В nodes_roles.csv нет gid для поиска.")
     st.stop()
 selected_gid = st.selectbox("Выбранный узел", all_gids, index=all_gids.index(default_gid), label_visibility="collapsed")
-row = nodes.loc[nodes[gid_col].astype(str) == selected_gid].iloc[0]
+row = nodes.loc[nodes[gid_col].map(gid_key) == selected_gid].iloc[0]
 
 left, right = st.columns([1.55, 1])
 with left:
@@ -248,15 +269,15 @@ with right:
     if evidence_cols:
         st.dataframe(pd.DataFrame({"Признак": evidence_cols,"Значение":[fmt(row[c]) for c in evidence_cols]}), hide_index=True, use_container_width=True, height=240)
     if top_schema_ok:
-        top_match = top.loc[top["gid"].astype(str) == selected_gid]
+        top_match = top.loc[top["gid"].map(gid_key) == selected_gid]
         if not top_match.empty:
             st.markdown("**В приоритетном списке**")
             st.write(f"Ранг {fmt(top_match.iloc[0]['rank'])} · {top_match.iloc[0]['why']}")
     st.markdown("**Входящие и исходящие связи**")
     src = col(edges, ["src","source","from_gid"]); dst = col(edges, ["dst","target","to_gid"])
     if not edges.empty and src and dst:
-        incoming = edges.loc[edges[dst].astype(str) == selected_gid]
-        outgoing = edges.loc[edges[src].astype(str) == selected_gid]
+        incoming = edges.loc[edges[dst].map(gid_key) == selected_gid]
+        outgoing = edges.loc[edges[src].map(gid_key) == selected_gid]
         amt = col(edges, ["sum_kzt","amount","weight"]); tx = col(edges, ["n_tx","tx_count"])
         def edge_table(frame, other):
             result = pd.DataFrame({"gid":frame[other].astype(str)})
