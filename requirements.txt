@@ -1,3 +1,6 @@
 pandas
 pyarrow
 networkx
+numpy
+streamlit
+plotly
