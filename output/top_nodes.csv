@@ -1,0 +1,21 @@
+rank,gid,role,priority_score,why
+1,100000000331309100,distributor,0.976271,role=distributor (1.00); turnover=23986010.00 KZT; degree=104; pass_ratio=23.36
+2,100000002578405100,distributor,0.974742,role=distributor (1.00); turnover=4308703.00 KZT; degree=118; pass_ratio=2.59
+3,100000002527114100,distributor,0.964556,role=distributor (1.00); turnover=3418249.00 KZT; degree=114; pass_ratio=25.50
+4,100000004400305100,distributor,0.93059,role=distributor (1.00); turnover=6052981.00 KZT; degree=89; pass_ratio=26.17
+5,100000003016635100,distributor,0.924418,role=distributor (1.00); turnover=10001062.00 KZT; degree=81; pass_ratio=16.04
+6,100000008603629100,distributor,0.917056,role=distributor (1.00); turnover=6803456.00 KZT; degree=80; pass_ratio=2.74
+7,100000006866783100,distributor,0.911883,role=distributor (1.00); turnover=4786849.00 KZT; degree=80; pass_ratio=4.71
+8,100000003684369100,distributor,0.898542,role=distributor (0.89); turnover=12437091.00 KZT; degree=86; pass_ratio=2.23
+9,100000000437046100,distributor,0.871543,role=distributor (1.00); turnover=8713424.00 KZT; degree=51; pass_ratio=6.87
+10,100000008477350100,distributor,0.858339,role=distributor (1.00); turnover=3984966.00 KZT; degree=50; pass_ratio=5.53
+11,100000000343175100,distributor,0.840393,role=distributor (1.00); turnover=4178751.00 KZT; degree=39; pass_ratio=22.38
+12,100000008489922100,distributor,0.83994,role=distributor (1.00); turnover=4051910.00 KZT; degree=39; pass_ratio=14.46
+13,100000008547948100,distributor,0.832296,role=distributor (1.00); turnover=5398265.00 KZT; degree=32; pass_ratio=24.38
+14,100000001697501100,distributor,0.829717,role=distributor (1.00); turnover=1606306.00 KZT; degree=41; pass_ratio=11.99
+15,100000005933757100,distributor,0.826316,role=distributor (0.96); turnover=4248628.00 KZT; degree=38; pass_ratio=2.41
+16,100000005242320100,distributor,0.825047,role=distributor (1.00); turnover=9301995.00 KZT; degree=23; pass_ratio=24.44
+17,100000008710791100,distributor,0.822934,role=distributor (1.00); turnover=5703021.00 KZT; degree=26; pass_ratio=30.42
+18,100000002957787100,distributor,0.822196,role=distributor (1.00); turnover=1361109.96 KZT; degree=38; pass_ratio=15.02
+19,100000008165763100,coordinator,0.820575,role=coordinator (1.00); turnover=2433673.00 KZT; degree=32; pass_ratio=1.09
+20,100000004156082100,distributor,0.820391,role=distributor (1.00); turnover=2696922.11 KZT; degree=31; pass_ratio=6.15
