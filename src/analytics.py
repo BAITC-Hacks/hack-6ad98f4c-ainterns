@@ -57,6 +57,51 @@ def _fast_transit_features(
     return counts, shares
 
 
+def _synchronous_and_repeat_features(
+    gids: pd.Series, transactions: pd.DataFrame
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Summarize same-day distinct senders and repeated similar amount pairs.
+
+    Similar amounts means at least two positive transactions for a directed
+    pair, with every amount within 10% of that pair's median. The metric counts
+    qualifying pairs incident to a node; it does not infer splitting or intent.
+    """
+    zero_int = pd.Series(0, index=gids.index, dtype="int64")
+    src_col = _find_column(transactions, ("src", "sender", "sender_gid", "from_gid"))
+    dst_col = _find_column(transactions, ("dst", "receiver", "receiver_gid", "to_gid"))
+    date_col = _find_column(transactions, ("date", "timestamp", "datetime", "created_at"))
+    amount_col = _find_column(transactions, ("sum_kzt", "amount", "value"))
+    if not (src_col and dst_col and date_col) or transactions.empty:
+        return zero_int, zero_int.copy(), zero_int.copy()
+
+    data = pd.DataFrame({
+        "src": transactions[src_col],
+        "dst": transactions[dst_col],
+        "date": pd.to_datetime(transactions[date_col], errors="coerce").dt.normalize(),
+    })
+    data["amount"] = _number(transactions[amount_col]) if amount_col else 0.0
+    data = data.dropna(subset=["src", "dst", "date"])
+
+    # Count unique senders per recipient and date, not raw transfers.
+    daily = data.groupby(["dst", "date"], sort=False)["src"].nunique()
+    multi_days = daily[daily >= 2].groupby(level="dst").size()
+    max_senders = daily.groupby(level="dst").max()
+    day_count = gids.map(multi_days).fillna(0).astype("int64")
+    daily_max = gids.map(max_senders).fillna(0).astype("int64")
+
+    pair_counts: dict[object, int] = {}
+    for (sender, receiver), group in data.groupby(["src", "dst"], sort=False):
+        amounts = group.loc[group["amount"] > 0, "amount"].to_numpy(dtype=float)
+        if len(amounts) < 2:
+            continue
+        median = float(np.median(amounts))
+        if median > 0 and float(np.max(np.abs(amounts - median))) <= 0.10 * median:
+            for gid in {sender, receiver}:
+                pair_counts[gid] = pair_counts.get(gid, 0) + 1
+    similar_pairs = gids.map(pair_counts).fillna(0).astype("int64")
+    return day_count, daily_max, similar_pairs
+
+
 def compute_node_features(
     nodes: pd.DataFrame, edges: pd.DataFrame, transactions: pd.DataFrame
 ) -> pd.DataFrame:
@@ -144,6 +189,11 @@ def compute_node_features(
     result["fast_transit_count"], result["fast_transit_share"] = _fast_transit_features(
         gids, transactions
     )
+    (
+        result["multi_sender_days"],
+        result["max_daily_senders"],
+        result["similar_amount_pair_count"],
+    ) = _synchronous_and_repeat_features(gids, transactions)
     result["role"], result["role_score"], result["evidence"] = zip(*[
         _classify(row) for row in result.to_dict(orient="records")
     ]) if len(result) else ([], [], [])
@@ -169,7 +219,6 @@ def _classify(row: dict) -> tuple[str, float, str]:
     dep = row.get("depth")
     depth = float(dep) if pd.notna(dep) else np.nan
     seed = bool(row["is_seed"])
-    tx = float(row["transaction_count"])
     eps = 1e-12
     if ind >= 2 and not seed and ia >= 1.25 * oa:
         role, raw = "consolidator", min(ind / 4, ia / max(1.25 * max(oa, eps), eps) / 2)
@@ -186,12 +235,31 @@ def _classify(row: dict) -> tuple[str, float, str]:
     score = float(np.clip(raw, 0.0, 1.0))
     depth_text = "неизвестна" if pd.isna(depth) else f"{depth:g}"
     evidence = (
-        f"{role}: вход. рёбер {ind}, исход. {out}; суммы {ia:.2f}/{oa:.2f} KZT; "
-        f"транзакций {tx:g}, depth {depth_text}, seed={'да' if seed else 'нет'}"
+        f"{role}: рёбра in/out={ind}/{out}; KZT in/out={ia:.0f}/{oa:.0f}; "
+        f"depth={depth_text}; seed={int(seed)}"
     )
-    if role == "transit":
-        evidence += (
-            f"; быстрый транзит {int(row['fast_transit_count'])} "
-            f"(доля {float(row['fast_transit_share']):.2f}, дата +1)"
+    additions = []
+    max_senders = int(row.get("max_daily_senders", 0))
+    if max_senders >= 3:
+        additions.append(
+            f"синхронно: за один день получил переводы от "
+            f"{max_senders} разных отправителей"
         )
-    return role, score, evidence[:200]
+    similar_pairs = int(row.get("similar_amount_pair_count", 0))
+    if similar_pairs:
+        pair_word = "пара" if similar_pairs % 10 == 1 and similar_pairs % 100 != 11 else (
+            "пары" if similar_pairs % 10 in (2, 3, 4) and similar_pairs % 100 not in (12, 13, 14) else "пар"
+        )
+        additions.append(
+            f"повторяющиеся переводы сходных сумм: {similar_pairs} {pair_word} (±10%)"
+        )
+    if role == "transit":
+        additions.append(
+            f"быстрый транзит {int(row['fast_transit_count'])} "
+            f"(доля {float(row['fast_transit_share']):.2f})"
+        )
+    for addition in additions:
+        candidate = evidence + "; " + addition
+        if len(candidate) <= 200:
+            evidence = candidate
+    return role, score, evidence
