@@ -174,32 +174,65 @@ def draw_graph(nodes, edges, selected_gid, gid_col, role_col, title="Ближа�
         angle = 2 * math.pi * i / max(1, len(ordered))
         positions[gid] = (2.0 * math.cos(angle), 2.0 * math.sin(angle))
     fig = go.Figure()
+    edge_x, edge_y, edge_labels, edge_hover = [], [], [], []
     for edge in relevant.to_dict(orient="records"):
         a, b = gid_key(edge[src_col]), gid_key(edge[dst_col])
         x1, y1 = positions[a]; x2, y2 = positions[b]
         on_seed_path = (a, b) in path_edges
         fig.add_annotation(x=x2, y=y2, ax=x1, ay=y1, xref="x", yref="y", axref="x", ayref="y",
-                           showarrow=True, arrowhead=3, arrowsize=1.3 if on_seed_path else 1.0,
-                           arrowwidth=3.2 if on_seed_path else 1.4,
-                           arrowcolor="#ff6b35" if on_seed_path else "#718ba5")
-        if amount_col:
-            fig.add_trace(go.Scatter(x=[(x1+x2)/2], y=[(y1+y2)/2], mode="text",
-                text=[fmt(edge.get(amount_col))], textfont={"size":9,"color":"#b9c8d8"}, hoverinfo="skip", showlegend=False))
+                           showarrow=True, arrowhead=3, arrowsize=1.5 if on_seed_path else 1.1,
+                           arrowwidth=3.5 if on_seed_path else 1.7,
+                           arrowcolor="#ff7a45" if on_seed_path else "#8297ad")
+        edge_x.append((x1 + x2) / 2)
+        edge_y.append((y1 + y2) / 2)
+        edge_labels.append(fmt(edge.get(amount_col)) if amount_col else "")
+        tx_value = fmt(edge.get(tx_col)) if tx_col else "не указано"
+        edge_hover.append(f"{a} → {b}<br>Сумма: {fmt(edge.get(amount_col)) if amount_col else 'не указана'} KZT<br>Транзакций: {tx_value}")
+    if edge_x:
+        fig.add_trace(go.Scatter(
+            x=edge_x, y=edge_y, mode="markers+text", text=edge_labels,
+            textposition="top center", textfont={"size": 10, "color": "#dce8f4"},
+            marker={"size": 18, "color": "#dce8f4", "opacity": 0.01},
+            customdata=edge_hover,
+            hovertemplate="%{customdata}<extra></extra>",
+            showlegend=False, name="Связи",
+        ))
     for role_name, color in ROLE_COLORS.items():
         ids = [gid for gid in keep if ((str(node_map[gid].get(role_col, "unknown")).lower() if role_col and gid in node_map else "unknown") == role_name)]
         if not ids:
             continue
+        node_hover = []
+        for gid in ids:
+            record = node_map.get(gid, {})
+            node_role = str(record.get(role_col, "unknown")) if role_col else "unknown"
+            cluster = gid_key(record.get("cluster_id", "—"))
+            priority = fmt(record.get("priority_score"))
+            node_hover.append(f"gid {gid}<br>Роль: {node_role}<br>Кластер: {cluster}<br>Приоритет: {priority}")
         fig.add_trace(go.Scatter(x=[positions[g][0] for g in ids], y=[positions[g][1] for g in ids],
             mode="markers+text", text=ids, textposition="top center", name=role_name,
             marker={"size":[32 if g == selected else 19 for g in ids], "color":color,
                     "line":{"width":[5 if g == selected else (3 if seed_path and g in seed_path else 1) for g in ids],
                             "color":["#f4bd50" if g == selected else ("#ff6b35" if seed_path and g in seed_path else color) for g in ids]}},
-            customdata=[str(node_map[g].get(role_col,"unknown")) if role_col and g in node_map else "unknown" for g in ids],
-            hovertemplate="gid %{text}<br>роль %{customdata}<extra></extra>"))
-    fig.update_layout(title=title, height=430, paper_bgcolor="#0c1724", plot_bgcolor="#0c1724",
-        font={"color":"#dbe7f2"}, margin={"l":10,"r":10,"t":45,"b":10}, showlegend=False,
-        xaxis={"visible":False,"range":[-2.8,2.8]}, yaxis={"visible":False,"range":[-2.8,2.8],"scaleanchor":"x"})
-    st.plotly_chart(fig, width="stretch", config={"displayModeBar":False})
+            customdata=node_hover,
+            hovertemplate="%{customdata}<extra></extra>"))
+    fig.update_layout(
+        title={"text": title, "x": 0.02, "xanchor": "left", "font": {"size": 16}},
+        height=510, paper_bgcolor="#0c1724", plot_bgcolor="#0c1724",
+        font={"color":"#dbe7f2"}, margin={"l":10,"r":10,"t":55,"b":10}, showlegend=False,
+        hoverlabel={"bgcolor":"#152437", "bordercolor":"#38516b", "font":{"color":"#f2f6fa"}},
+        dragmode="pan", uirevision=f"{title}:{selected}",
+        xaxis={"visible":False,"range":[-2.8,2.8],"fixedrange":False},
+        yaxis={"visible":False,"range":[-2.8,2.8],"scaleanchor":"x","fixedrange":False},
+    )
+    st.plotly_chart(
+        fig, width="stretch",
+        config={
+            "displayModeBar": True, "displaylogo": False, "scrollZoom": True,
+            "doubleClick": "reset", "modeBarButtonsToRemove": ["select2d", "lasso2d"],
+            "toImageButtonOptions": {"format": "png", "filename": "money-graph-neighborhood", "scale": 2},
+            "responsive": True,
+        },
+    )
 
 st.title("Граф денег")
 st.caption("Локальная рабочая панель AML-аналитика · признаки и гипотезы для проверки")
@@ -339,6 +372,7 @@ left, right = st.columns([1.5, 1])
 with left:
     st.subheader("Направленное окружение")
     st.caption(f"Выбранный узел {selected_gid} · кластер {gid_key(row[cluster_col])}")
+    st.caption("Колесо мыши — масштаб · перетаскивание — перемещение · двойной щелчок — сброс. Наведите курсор на узел или сумму, чтобы увидеть подробности.")
     legend = "&nbsp;&nbsp;".join(
         f'<span style="color:{color}">●</span> {esc(role)}'
         for role, color in ROLE_COLORS.items() if role != "unknown"
