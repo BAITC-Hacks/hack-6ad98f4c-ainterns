@@ -214,12 +214,15 @@ if top_schema_ok:
     st.caption("Аналитический приоритет для проверки, не утверждение о нарушении.")
     priority_view = top[["rank", "gid", "role", "priority_score", "why"]].copy()
     priority_view["priority_score"] = pd.to_numeric(priority_view["priority_score"], errors="coerce")
+    priority_view["why"] = priority_view["why"].map(
+        lambda value: str(value).replace("; ", "\n")
+    )
     priority_view = priority_view.rename(columns={
         "rank": "Ранг",
         "gid": "GID",
         "role": "Роль",
         "priority_score": "Приоритет",
-        "why": "Почему в списке",
+        "why": "Почему проверить",
     })
     st.dataframe(
         priority_view,
@@ -236,7 +239,10 @@ if top_schema_ok:
                 format="%.3f",
                 width="small",
             ),
-            "Почему в списке": st.column_config.TextColumn(width="large"),
+            "Почему проверить": st.column_config.TextColumn(
+                width="large",
+                help="Роль, оборот, связность, pass ratio и ближайший seed-путь.",
+            ),
         },
     )
 
