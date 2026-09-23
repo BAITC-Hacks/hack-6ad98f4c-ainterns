@@ -1,5 +1,6 @@
 """Local AML analyst dashboard for the Money Graph project."""
 from pathlib import Path
+from decimal import Decimal, InvalidOperation
 import math
 import re
 
@@ -24,6 +25,8 @@ st.markdown("""<style>
 html, body, [class*="css"] {font-family:Manrope, sans-serif;}
 .block-container {padding-top:1.4rem; max-width:1500px;}
 [data-testid="stMetric"] {background:#111d2b;padding:14px 18px;border:1px solid #263648;border-radius:12px;}
+[data-testid="stMetricLabel"] {white-space:normal !important; overflow:visible !important; line-height:1.2; font-size:.78rem;}
+[data-testid="stMetricValue"] {font-size:1.65rem; white-space:nowrap; overflow:visible !important;}
 [data-testid="stSidebar"] {background:#0b1420;}
 .small-muted {color:#8fa2b7;font-size:.88rem;}
 .pill {display:inline-block;padding:4px 10px;border-radius:100px;background:#203247;color:#c7d7e6;font-size:.8rem;}
@@ -61,8 +64,12 @@ def gid_key(value):
     if pd.isna(value):
         return ""
     text = str(value).strip()
-    if re.fullmatch(r"[+-]?\d+\.0+", text):
-        return text.split(".", 1)[0]
+    try:
+        number = Decimal(text)
+        if number == number.to_integral_value():
+            return str(number.quantize(Decimal("1")))
+    except (InvalidOperation, ValueError):
+        pass
     return text
 
 
@@ -104,6 +111,22 @@ def nearest_seed_path(graph, seeds, target):
     return best_seed, nx.shortest_path(graph, best_seed, target)
 
 
+def neighborhood_frame(edges, src_col, dst_col, selected, steps):
+    """Keep directed edges touching the selected node within an undirected radius."""
+    adjacency = {}
+    for source, target in zip(edges[src_col].map(gid_key), edges[dst_col].map(gid_key)):
+        adjacency.setdefault(source, set()).add(target)
+        adjacency.setdefault(target, set()).add(source)
+    visible = {selected}
+    frontier = {selected}
+    for _ in range(max(1, int(steps))):
+        frontier = {neighbor for node in frontier for neighbor in adjacency.get(node, set())} - visible
+        visible.update(frontier)
+    source_keys = edges[src_col].map(gid_key)
+    target_keys = edges[dst_col].map(gid_key)
+    return edges[source_keys.isin(visible) & target_keys.isin(visible)].copy()
+
+
 def require_columns(df, filename, required):
     missing = [name for name in required if name not in df.columns]
     if missing:
@@ -133,7 +156,8 @@ def esc(value):
 
 
 def draw_graph(nodes, edges, selected_gid, gid_col, role_col, title="Ближайшие связи",
-               selected_neighborhood=True, include_all_nodes=False, seed_path=None):
+               selected_neighborhood=True, include_all_nodes=False, seed_path=None,
+               neighborhood_steps=1):
     gid_col = col(nodes, ["gid", "node", "id"])
     src_col = col(edges, ["src", "source", "from_gid"])
     dst_col = col(edges, ["dst", "target", "to_gid"])
@@ -143,7 +167,7 @@ def draw_graph(nodes, edges, selected_gid, gid_col, role_col, title="Ближа�
     selected = str(selected_gid)
     src_keys = edges[src_col].map(gid_key)
     dst_keys = edges[dst_col].map(gid_key)
-    relevant = edges[(src_keys == selected) | (dst_keys == selected)].copy() if selected_neighborhood else edges.copy()
+    relevant = neighborhood_frame(edges, src_col, dst_col, selected, neighborhood_steps) if selected_neighborhood else edges.copy()
     if selected_neighborhood and len(relevant) > 80:
         amount_col = col(relevant, ["sum_kzt", "amount", "weight"])
         relevant = relevant.assign(_rank=pd.to_numeric(relevant[amount_col], errors="coerce").fillna(0) if amount_col else 0).nlargest(80, "_rank")
@@ -301,23 +325,92 @@ if nodes_path.exists():
     except Exception as exc:
         st.warning(f"Не удалось прочитать seed из data/nodes.parquet: {exc}")
 
+transactions = pd.DataFrame()
 transaction_count = None
 if transactions_path.exists():
     try:
-        transaction_count = len(read_parquet(str(transactions_path), transactions_path.stat().st_mtime_ns))
+        transactions = read_parquet(str(transactions_path), transactions_path.stat().st_mtime_ns)
+        transaction_count = len(transactions)
     except Exception as exc:
         st.warning(f"Не удалось прочитать data/transactions.parquet: {exc}")
 
-k1, k2, k3, k4, k5 = st.columns(5)
+k1, k2, k3 = st.columns(3)
 k1.metric("Узлы", f"{len(nodes):,}".replace(",", " "))
 k2.metric("Направленные рёбра", f"{len(edges):,}".replace(",", " ") if edges_valid else "—")
 k3.metric("Транзакции", f"{transaction_count:,}".replace(",", " ") if transaction_count is not None else "—")
+k4, k5 = st.columns(2)
 k4.metric("Seed", f"{len(seed_ids):,}".replace(",", " ") if seed_data_ok else "—")
 k5.metric("Кластеры", f"{clusters[cluster_col].nunique():,}" if clusters_schema_ok else "—")
 if edges_valid:
     st.caption(f"Сумма агрегированных рёбер: {fmt(edges[edge_amount].sum())} KZT · порог выборки 5 000 KZT.")
 elif not edges_path.exists():
     st.warning(f"Не найден файл связей: {edges_path}")
+
+st.subheader("Обзор сети")
+st.caption("Сводка показывает наблюдаемую часть выгрузки, а не полный баланс клиентов.")
+overview_left, overview_right = st.columns(2)
+with overview_left:
+    role_counts = nodes[role_col].value_counts().reindex([role for role in ROLE_COLORS if role != "unknown"], fill_value=0)
+    role_fig = go.Figure(go.Bar(
+        x=role_counts.values,
+        y=role_counts.index,
+        orientation="h",
+        marker_color=[ROLE_COLORS[role] for role in role_counts.index],
+        text=role_counts.values,
+        textposition="outside",
+        hovertemplate="Роль: %{y}<br>Узлов: %{x}<extra></extra>",
+    ))
+    role_fig.update_layout(title="Узлы по ролям", xaxis_title="Число узлов", yaxis_title="Роль",
+                           height=330, margin={"l": 10, "r": 35, "t": 55, "b": 35},
+                           paper_bgcolor="#0c1724", plot_bgcolor="#0c1724", font={"color": "#dbe7f2"})
+    st.plotly_chart(role_fig, width="stretch", config={"displayModeBar": False})
+    st.caption("Роль — структурная гипотеза для проверки, не утверждение о нарушении.")
+with overview_right:
+    top_chart = top.copy() if top_schema_ok else pd.DataFrame()
+    if not top_chart.empty:
+        top_chart["gid"] = top_chart["gid"].map(gid_key)
+        top_chart["priority_score"] = pd.to_numeric(top_chart["priority_score"], errors="coerce")
+        top_chart = top_chart.sort_values("priority_score", ascending=True)
+        top_fig = go.Figure(go.Bar(
+            x=top_chart["priority_score"],
+            y=top_chart["gid"],
+            orientation="h",
+            marker_color=[ROLE_COLORS.get(str(role), ROLE_COLORS["unknown"]) for role in top_chart["role"]],
+            customdata=top_chart[["role"]],
+            hovertemplate="GID: %{y}<br>Роль: %{customdata[0]}<br>Приоритет: %{x:.3f}<extra></extra>",
+        ))
+        top_fig.update_layout(title="Топ-20 по приоритету", xaxis_title="Priority score (0–1)",
+                              yaxis_title="GID", height=330, margin={"l": 10, "r": 25, "t": 55, "b": 35},
+                              paper_bgcolor="#0c1724", plot_bgcolor="#0c1724", font={"color": "#dbe7f2"})
+        st.plotly_chart(top_fig, width="stretch", config={"displayModeBar": False})
+        st.caption("Чем выше score, тем раньше узел стоит проверить; причины раскрыты в таблице ниже.")
+    else:
+        st.info("График top-20 недоступен без корректного top_nodes.csv.")
+
+if "depth" in node_meta.columns:
+    depth_frame = node_meta[["gid", "depth"]].copy()
+    depth_frame["gid"] = depth_frame["gid"].map(gid_key)
+    depth_frame["depth"] = pd.to_numeric(depth_frame["depth"], errors="coerce")
+    depth_frame = depth_frame.dropna(subset=["depth"]).merge(nodes[["gid", "role"]].assign(gid=nodes["gid"].map(gid_key)), on="gid", how="inner")
+    depth_counts = depth_frame.groupby(["depth", "role"], as_index=False).size()
+    depth_fig = go.Figure()
+    for role, group in depth_counts.groupby("role"):
+        depth_fig.add_trace(go.Bar(x=group["depth"], y=group["size"], name=role, marker_color=ROLE_COLORS.get(role, ROLE_COLORS["unknown"])))
+    depth_fig.update_layout(barmode="stack", title="Роли по глубине обхода", xaxis_title="Depth (колено)",
+                            yaxis_title="Число узлов", height=330, paper_bgcolor="#0c1724", plot_bgcolor="#0c1724",
+                            font={"color": "#dbe7f2"}, margin={"l": 10, "r": 25, "t": 55, "b": 35})
+    st.plotly_chart(depth_fig, width="stretch", config={"displayModeBar": False})
+    st.caption("Depth 4 — край выгрузки; отсутствие исходящего ребра там не доказывает terminal.")
+
+if clusters_schema_ok:
+    cluster_options = clusters["cluster_id"].astype(str).tolist()
+    selected_cluster = st.selectbox("Исследовать кластер", cluster_options, key="overview_cluster")
+    selected_cluster_row = clusters.loc[clusters["cluster_id"].astype(str) == selected_cluster].iloc[0]
+    cm1, cm2, cm3 = st.columns(3)
+    cm1.metric("Узлов в кластере", fmt(selected_cluster_row["n_nodes"]))
+    cm2.metric("Seed", fmt(selected_cluster_row["n_seed"]))
+    cm3.metric("Внутренний оборот, KZT", fmt(selected_cluster_row["sum_kzt_internal"]))
+    st.info(f"Гипотеза: {selected_cluster_row['hypothesis']}")
 
 all_gids = nodes[gid_col].map(gid_key).tolist()
 gid_set = set(all_gids)
@@ -372,6 +465,7 @@ left, right = st.columns([1.5, 1])
 with left:
     st.subheader("Направленное окружение")
     st.caption(f"Выбранный узел {selected_gid} · кластер {gid_key(row[cluster_col])}")
+    neighborhood_steps = st.radio("Радиус окружения", [1, 2], horizontal=True, format_func=lambda value: f"{value} шаг" if value == 1 else f"{value} шага", key="neighborhood_steps")
     st.caption("Колесо мыши — масштаб · перетаскивание — перемещение · двойной щелчок — сброс. Наведите курсор на узел или сумму, чтобы увидеть подробности.")
     legend = "&nbsp;&nbsp;".join(
         f'<span style="color:{color}">●</span> {esc(role)}'
@@ -395,7 +489,8 @@ with left:
             st.success(f"Seed {seed} → {' → '.join(seed_path)} · {len(seed_path) - 1} рёбер. Путь выделен оранжевым.")
     if edges_valid:
         draw_graph(nodes, edges, selected_gid, gid_col, role_col,
-                   "Ближайшие связи и путь от seed", seed_path=seed_path)
+                   "Ближайшие связи и путь от seed", seed_path=seed_path,
+                   neighborhood_steps=neighborhood_steps)
 
 with right:
     role_text = str(row[role_col])
@@ -427,10 +522,51 @@ with right:
         st.dataframe(edge_table(incoming, edge_src).head(8), hide_index=True, width="stretch", height=190)
         st.markdown("**Исходящие связи**")
         st.dataframe(edge_table(outgoing, edge_dst).head(8), hide_index=True, width="stretch", height=190)
+        flow_left, flow_right = st.columns(2)
+        for holder, frame, other, title, color in (
+            (flow_left, incoming, edge_src, "От кого получил", "#4cc9f0"),
+            (flow_right, outgoing, edge_dst, "Кому отправил", "#fca311"),
+        ):
+            with holder:
+                grouped = frame.assign(_gid=frame[other].map(gid_key)).groupby("_gid", as_index=False)[edge_amount].sum().nlargest(8, edge_amount)
+                if grouped.empty:
+                    st.caption(f"{title}: нет наблюдаемых переводов")
+                else:
+                    flow_fig = go.Figure(go.Bar(
+                        x=grouped[edge_amount], y=grouped["_gid"], orientation="h", marker_color=color,
+                        hovertemplate="GID: %{y}<br>Сумма: %{x:,.2f} KZT<extra></extra>",
+                    ))
+                    flow_fig.update_layout(title=title, xaxis_title="Наблюдаемая сумма, KZT", yaxis_title="GID",
+                                           height=270, margin={"l": 5, "r": 10, "t": 45, "b": 30},
+                                           paper_bgcolor="#0c1724", plot_bgcolor="#0c1724", font={"color": "#dbe7f2"})
+                    st.plotly_chart(flow_fig, width="stretch", config={"displayModeBar": False})
+        st.caption("Суммы — наблюдаемые в выгрузке по агрегированным рёбрам, не полный баланс клиента.")
         if incoming.empty and outgoing.empty:
             st.info("У этого узла нет рёбер в наблюдаемой выборке.")
     else:
         st.info("Суммы связей недоступны: проверьте data/edges.parquet.")
+
+    if not transactions.empty:
+        tx_src = col(transactions, ["src", "sender", "sender_gid"])
+        tx_dst = col(transactions, ["dst", "receiver", "receiver_gid"])
+        tx_date = col(transactions, ["date", "timestamp", "datetime"])
+        tx_amount = col(transactions, ["sum_kzt", "amount", "value"])
+        if tx_src and tx_dst and tx_date and tx_amount:
+            activity = transactions.copy()
+            activity["_date"] = pd.to_datetime(activity[tx_date], errors="coerce").dt.date
+            activity["_amount"] = pd.to_numeric(activity[tx_amount], errors="coerce").fillna(0)
+            daily_in = activity.loc[activity[tx_dst].map(gid_key) == selected_gid].groupby("_date")["_amount"].sum()
+            daily_out = activity.loc[activity[tx_src].map(gid_key) == selected_gid].groupby("_date")["_amount"].sum()
+            dates = sorted(set(daily_in.index) | set(daily_out.index))
+            if dates:
+                activity_fig = go.Figure()
+                activity_fig.add_trace(go.Scatter(x=dates, y=[daily_in.get(day, 0) for day in dates], mode="lines+markers", name="Входящие", line={"color": "#4cc9f0"}))
+                activity_fig.add_trace(go.Scatter(x=dates, y=[daily_out.get(day, 0) for day in dates], mode="lines+markers", name="Исходящие", line={"color": "#fca311"}))
+                activity_fig.update_layout(title="Наблюдаемая активность по дням июля", xaxis_title="Дата", yaxis_title="Сумма, KZT",
+                                           height=300, paper_bgcolor="#0c1724", plot_bgcolor="#0c1724", font={"color": "#dbe7f2"},
+                                           margin={"l": 10, "r": 15, "t": 50, "b": 35})
+                st.plotly_chart(activity_fig, width="stretch", config={"displayModeBar": False})
+                st.caption("Активность показывает видимые операции по датам, а не остаток или полный баланс.")
 
 if pd.notna(row[cluster_col]):
     st.divider()
