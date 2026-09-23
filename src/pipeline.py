@@ -211,7 +211,7 @@ def run(data_dir: Path = DEFAULT_DATA, output_dir: Path = DEFAULT_OUTPUT) -> Non
         lambda row: (
             f"{row.why}; seed={seed_paths[row.gid][0]}, directed_path_length={seed_paths[row.gid][1]}"
             if row.gid in seed_paths
-            else f"{row.why}; seed=нет направленного пути"
+            else f"{row.why}; путь в пределах выгрузки не найден"
         ),
         axis=1,
     )
