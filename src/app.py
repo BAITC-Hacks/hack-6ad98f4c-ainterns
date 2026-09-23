@@ -208,6 +208,38 @@ k2.metric("Кластеров", f"{clusters[cluster_col].nunique():,}" if cluste
 k3.metric("В топ-листе", f"{len(top):,}".replace(",", " ") if not top.empty else "—")
 k4.metric("Порог транзакций", "5 000 KZT")
 
+if top_schema_ok:
+    st.divider()
+    st.subheader("Кого проверить первым")
+    st.caption("Аналитический приоритет для проверки, не утверждение о нарушении.")
+    priority_view = top[["rank", "gid", "role", "priority_score", "why"]].copy()
+    priority_view["priority_score"] = pd.to_numeric(priority_view["priority_score"], errors="coerce")
+    priority_view = priority_view.rename(columns={
+        "rank": "Ранг",
+        "gid": "GID",
+        "role": "Роль",
+        "priority_score": "Приоритет",
+        "why": "Почему в списке",
+    })
+    st.dataframe(
+        priority_view,
+        hide_index=True,
+        use_container_width=True,
+        height=430,
+        column_config={
+            "Ранг": st.column_config.NumberColumn(format="%d", width="small"),
+            "GID": st.column_config.TextColumn(width="medium"),
+            "Роль": st.column_config.TextColumn(width="small"),
+            "Приоритет": st.column_config.ProgressColumn(
+                min_value=0,
+                max_value=1,
+                format="%.3f",
+                width="small",
+            ),
+            "Почему в списке": st.column_config.TextColumn(width="large"),
+        },
+    )
+
 
 with st.sidebar:
     st.header("Навигация")
