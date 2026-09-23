@@ -4,15 +4,19 @@
 
 ## Установка и запуск
 
-Требуется Python 3.10+. Команды выполняются из корня репозитория:
+Требуется Python 3.10+ и файлы датасета в `data/`. Все команды запускайте из корня репозитория.
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate       # Windows: .venv\Scripts\activate
+source .venv/bin/activate       # Bash/Zsh; Fish: source .venv/bin/activate.fish
 python -m pip install -r requirements.txt
-python -m src.pipeline          # пересчёт CSV из трёх parquet
-streamlit run app.py            # открыть интерфейс отдельно
+python -m src.pipeline          # подготовить CSV, если output ещё не создан
+streamlit run app.py
 ```
+
+После старта откройте в браузере [http://localhost:8501](http://localhost:8501). Чтобы остановить сервер, нажмите `Ctrl+C` в терминале.
+
+Если не хотите активировать окружение, вызывайте его программы напрямую: `.venv/bin/python -m pip install -r requirements.txt`, затем `.venv/bin/python -m src.pipeline` и `.venv/bin/streamlit run app.py`.
 
 Входы: `data/nodes.parquet`, `data/edges.parquet`, `data/transactions.parquet`. Пайплайн сохраняет `output/nodes_roles.csv`, `output/clusters.csv`, `output/top_nodes.csv`. Панель рассчитана на запуск из корня, но пути к файлам разрешает относительно расположения `src/app.py`.
 
