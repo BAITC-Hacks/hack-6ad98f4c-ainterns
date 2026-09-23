@@ -4,6 +4,7 @@ import math
 import re
 
 import pandas as pd
+import networkx as nx
 import streamlit as st
 import plotly.graph_objects as go
 
@@ -65,6 +66,44 @@ def gid_key(value):
     return text
 
 
+@st.cache_data(show_spinner=False)
+def read_parquet(path, modified):
+    return pd.read_parquet(path)
+
+
+@st.cache_resource(show_spinner=False)
+def directed_graph_from_file(path, modified):
+    frame = read_parquet(path, modified)
+    required = {"src", "dst", "sum_kzt"}
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise ValueError("ожидаются колонки src, dst, sum_kzt; отсутствуют " + ", ".join(missing))
+    graph = nx.DiGraph()
+    graph.add_edges_from((gid_key(src), gid_key(dst)) for src, dst in zip(frame["src"], frame["dst"]))
+    return frame, graph
+
+
+def nearest_seed_path(graph, seeds, target):
+    """Return a shortest directed seed-to-target path, tie-breaking by seed gid."""
+    seed_keys = {gid_key(seed) for seed in seeds}
+    if target in seed_keys:
+        return target, [target]
+    best_seed = None
+    best_distance = None
+    for seed in sorted(seed_keys):
+        if seed not in graph:
+            continue
+        try:
+            distance = nx.shortest_path_length(graph, seed, target)
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            continue
+        if best_distance is None or distance < best_distance:
+            best_seed, best_distance = seed, distance
+    if best_seed is None:
+        return None
+    return best_seed, nx.shortest_path(graph, best_seed, target)
+
+
 def require_columns(df, filename, required):
     missing = [name for name in required if name not in df.columns]
     if missing:
@@ -94,7 +133,7 @@ def esc(value):
 
 
 def draw_graph(nodes, edges, selected_gid, gid_col, role_col, title="Ближайшие связи",
-               selected_neighborhood=True, include_all_nodes=False):
+               selected_neighborhood=True, include_all_nodes=False, seed_path=None):
     gid_col = col(nodes, ["gid", "node", "id"])
     src_col = col(edges, ["src", "source", "from_gid"])
     dst_col = col(edges, ["dst", "target", "to_gid"])
@@ -105,14 +144,24 @@ def draw_graph(nodes, edges, selected_gid, gid_col, role_col, title="Ближа�
     src_keys = edges[src_col].map(gid_key)
     dst_keys = edges[dst_col].map(gid_key)
     relevant = edges[(src_keys == selected) | (dst_keys == selected)].copy() if selected_neighborhood else edges.copy()
+    if selected_neighborhood and len(relevant) > 80:
+        amount_col = col(relevant, ["sum_kzt", "amount", "weight"])
+        relevant = relevant.assign(_rank=pd.to_numeric(relevant[amount_col], errors="coerce").fillna(0) if amount_col else 0).nlargest(80, "_rank")
+    path_edges = set(zip(seed_path, seed_path[1:])) if seed_path and len(seed_path) > 1 else set()
+    if path_edges:
+        all_pairs = pd.Series(list(zip(src_keys, dst_keys)), index=edges.index)
+        path_frame = edges.loc[all_pairs.isin(path_edges)]
+        relevant = pd.concat([relevant, path_frame]).drop_duplicates(subset=[src_col, dst_col])
     node_records = nodes.to_dict(orient="records")
     node_map = {gid_key(record[gid_col]): record for record in node_records}
     neighbor_ids = set(relevant[src_col].map(gid_key)) | set(relevant[dst_col].map(gid_key))
     keep = {selected} | neighbor_ids
+    if seed_path:
+        keep.update(seed_path)
     if include_all_nodes:
         keep.update(nodes[gid_col].map(gid_key))
     # Cap visual clutter without changing the loaded data or adjacency shown in the card.
-    if len(relevant) > 80:
+    if not selected_neighborhood and len(relevant) > 80:
         amount_col = col(relevant, ["sum_kzt", "amount", "weight"])
         relevant = relevant.assign(_rank=pd.to_numeric(relevant[amount_col], errors="coerce").fillna(0) if amount_col else 0).nlargest(80, "_rank")
         keep = {selected} | set(relevant[src_col].map(gid_key)) | set(relevant[dst_col].map(gid_key))
@@ -128,8 +177,11 @@ def draw_graph(nodes, edges, selected_gid, gid_col, role_col, title="Ближа�
     for edge in relevant.to_dict(orient="records"):
         a, b = gid_key(edge[src_col]), gid_key(edge[dst_col])
         x1, y1 = positions[a]; x2, y2 = positions[b]
+        on_seed_path = (a, b) in path_edges
         fig.add_annotation(x=x2, y=y2, ax=x1, ay=y1, xref="x", yref="y", axref="x", ayref="y",
-                           showarrow=True, arrowhead=3, arrowsize=1.2, arrowwidth=1.4, arrowcolor="#718ba5")
+                           showarrow=True, arrowhead=3, arrowsize=1.3 if on_seed_path else 1.0,
+                           arrowwidth=3.2 if on_seed_path else 1.4,
+                           arrowcolor="#ff6b35" if on_seed_path else "#718ba5")
         if amount_col:
             fig.add_trace(go.Scatter(x=[(x1+x2)/2], y=[(y1+y2)/2], mode="text",
                 text=[fmt(edge.get(amount_col))], textfont={"size":9,"color":"#b9c8d8"}, hoverinfo="skip", showlegend=False))
@@ -140,7 +192,8 @@ def draw_graph(nodes, edges, selected_gid, gid_col, role_col, title="Ближа�
         fig.add_trace(go.Scatter(x=[positions[g][0] for g in ids], y=[positions[g][1] for g in ids],
             mode="markers+text", text=ids, textposition="top center", name=role_name,
             marker={"size":[32 if g == selected else 19 for g in ids], "color":color,
-                    "line":{"width":[4 if g == selected else 1 for g in ids], "color":"#f4bd50"}},
+                    "line":{"width":[5 if g == selected else (3 if seed_path and g in seed_path else 1) for g in ids],
+                            "color":["#f4bd50" if g == selected else ("#ff6b35" if seed_path and g in seed_path else color) for g in ids]}},
             customdata=[str(node_map[g].get(role_col,"unknown")) if role_col and g in node_map else "unknown" for g in ids],
             hovertemplate="gid %{text}<br>роль %{customdata}<extra></extra>"))
     fig.update_layout(title=title, height=430, paper_bgcolor="#0c1724", plot_bgcolor="#0c1724",
@@ -149,7 +202,7 @@ def draw_graph(nodes, edges, selected_gid, gid_col, role_col, title="Ближа�
     st.plotly_chart(fig, width="stretch", config={"displayModeBar":False})
 
 st.title("Граф денег")
-st.caption("Локальная рабочая панель AML-аналитика · исследовательские признаки и гипотезы для проверки")
+st.caption("Локальная рабочая панель AML-аналитика · признаки и гипотезы для проверки")
 nodes = load_csv("nodes_roles.csv")
 clusters = load_csv("clusters.csv")
 top = load_csv("top_nodes.csv")
@@ -158,14 +211,11 @@ if nodes.empty:
     missing = [name for name in ("nodes_roles.csv", "clusters.csv", "top_nodes.csv") if not (OUT / name).exists()]
     st.info("Для панели нужны выходные CSV из пайплайна. " +
             ("Не найдены: " + ", ".join(missing) + ". " if missing else "nodes_roles.csv пуст. ") +
-            f"Ожидаемая папка: `{OUT}`. Запустите `python -m src.pipeline` из корня проекта после установки входных parquet в `{DATA}`.")
+            f"Ожидаемая папка: `{OUT}`. Пересчитайте результаты командой `python -m src.pipeline` из корня проекта.")
     st.stop()
 
-gid_col = col(nodes, ["gid", "node", "id"])
-if gid_col is None:
-    st.error("В output/nodes_roles.csv отсутствует обязательная колонка gid.")
-    st.stop()
-if not require_columns(nodes, "nodes_roles.csv", ["gid", "role", "role_score", "cluster_id", "priority_score", "evidence"]):
+required_node_cols = ["gid", "role", "role_score", "cluster_id", "priority_score", "evidence"]
+if not require_columns(nodes, "nodes_roles.csv", required_node_cols):
     st.stop()
 if nodes["gid"].isna().any() or nodes["gid"].duplicated().any():
     st.error("В nodes_roles.csv колонка gid должна быть заполнена и уникальна.")
@@ -177,128 +227,182 @@ if nodes["evidence"].astype(str).str.strip().eq("").any():
     st.error("Поле evidence в nodes_roles.csv должно содержать объяснение для каждого узла.")
     st.stop()
 allowed_roles = set(ROLE_COLORS) - {"unknown"}
-unexpected_roles = sorted(set(nodes["role"].dropna().astype(str)) - allowed_roles)
+unexpected_roles = sorted(set(nodes["role"].astype(str)) - allowed_roles)
 if unexpected_roles:
     st.error("В nodes_roles.csv обнаружены неизвестные роли: " + ", ".join(unexpected_roles))
     st.stop()
 for score_name in ("role_score", "priority_score"):
     score_values = pd.to_numeric(nodes[score_name], errors="coerce")
     if score_values.isna().any() or not score_values.between(0, 1).all():
-        st.error(f"Значения {score_name} в nodes_roles.csv должны быть числами в диапазоне [0, 1].")
+        st.error(f"Значения {score_name} должны быть числами в диапазоне [0, 1].")
         st.stop()
-role_col = "role"
-role_score_col = "role_score"
-priority_score_col = "priority_score"
-cluster_col = "cluster_id"
-evidence_col = "evidence"
+
+gid_col, role_col = "gid", "role"
+role_score_col, priority_score_col = "role_score", "priority_score"
+cluster_col, evidence_col = "cluster_id", "evidence"
 top_schema_ok = require_columns(top, "top_nodes.csv", ["rank", "gid", "role", "priority_score", "why"]) if not top.empty else False
 clusters_schema_ok = require_columns(clusters, "clusters.csv", ["cluster_id", "n_nodes", "n_seed", "sum_kzt_internal", "top_gids", "hypothesis"]) if not clusters.empty else False
 
-k1,k2,k3,k4 = st.columns(4)
-k1.metric("Узлов с ролями", f"{len(nodes):,}".replace(",", " "))
-k2.metric("Кластеров", f"{clusters[cluster_col].nunique():,}" if clusters_schema_ok else "—")
-k3.metric("В топ-листе", f"{len(top):,}".replace(",", " ") if top_schema_ok else "—")
-k4.metric("Порог транзакций", "5 000 KZT")
+edges_path, nodes_path = DATA / "edges.parquet", DATA / "nodes.parquet"
+transactions_path = DATA / "transactions.parquet"
+edges, graph, node_meta = pd.DataFrame(), None, pd.DataFrame()
+if edges_path.exists():
+    try:
+        edges, graph = directed_graph_from_file(str(edges_path), edges_path.stat().st_mtime_ns)
+    except Exception as exc:
+        st.error(f"Не удалось загрузить data/edges.parquet: {exc}")
+edge_src = col(edges, ["src", "source", "from_gid"])
+edge_dst = col(edges, ["dst", "target", "to_gid"])
+edge_amount = col(edges, ["sum_kzt", "amount", "weight"])
+edges_valid = bool(not edges.empty and edge_src and edge_dst and edge_amount and graph is not None)
 
+seed_ids, seed_data_ok = [], False
+if nodes_path.exists():
+    try:
+        node_meta = read_parquet(str(nodes_path), nodes_path.stat().st_mtime_ns)
+        if {"gid", "is_seed"}.issubset(node_meta.columns):
+            seed_ids = node_meta.loc[node_meta["is_seed"].fillna(False).astype(bool), "gid"].map(gid_key).tolist()
+            seed_data_ok = True
+        else:
+            st.warning("Для поиска seed-пути в nodes.parquet ожидаются колонки gid и is_seed.")
+    except Exception as exc:
+        st.warning(f"Не удалось прочитать seed из data/nodes.parquet: {exc}")
 
-with st.sidebar:
-    st.header("Навигация")
-    st.caption("Поиск по идентификатору узла")
-    search = st.text_input("gid", placeholder="Введите gid", label_visibility="collapsed")
-    if not top.empty:
-        st.divider()
-        st.subheader("Приоритеты")
-        if top_schema_ok:
-            top_view = top.rename(columns={"rank":"Ранг", "gid":"GID", "role":"Роль", "priority_score":"Приоритет", "why":"Объяснение"})
-            st.dataframe(top_view[["Ранг", "GID", "Роль", "Приоритет", "Объяснение"]], hide_index=True, width="stretch", height=360)
-    else:
-        st.info("top_nodes.csv отсутствует или пуст: топ-лист недоступен.")
+transaction_count = None
+if transactions_path.exists():
+    try:
+        transaction_count = len(read_parquet(str(transactions_path), transactions_path.stat().st_mtime_ns))
+    except Exception as exc:
+        st.warning(f"Не удалось прочитать data/transactions.parquet: {exc}")
+
+k1, k2, k3, k4, k5 = st.columns(5)
+k1.metric("Узлы", f"{len(nodes):,}".replace(",", " "))
+k2.metric("Направленные рёбра", f"{len(edges):,}".replace(",", " ") if edges_valid else "—")
+k3.metric("Транзакции", f"{transaction_count:,}".replace(",", " ") if transaction_count is not None else "—")
+k4.metric("Seed", f"{len(seed_ids):,}".replace(",", " ") if seed_data_ok else "—")
+k5.metric("Кластеры", f"{clusters[cluster_col].nunique():,}" if clusters_schema_ok else "—")
+if edges_valid:
+    st.caption(f"Сумма агрегированных рёбер: {fmt(edges[edge_amount].sum())} KZT · порог выборки 5 000 KZT.")
+elif not edges_path.exists():
+    st.warning(f"Не найден файл связей: {edges_path}")
 
 all_gids = nodes[gid_col].map(gid_key).tolist()
 gid_set = set(all_gids)
-search_key = gid_key(search)
-default_gid = search_key if search_key in gid_set else (all_gids[0] if all_gids else "")
-if search.strip() and search_key not in gid_set:
-    st.warning("Такой gid не найден в nodes_roles.csv.")
 if not all_gids:
     st.error("В nodes_roles.csv нет gid для поиска.")
     st.stop()
-selected_gid = st.selectbox("Выбранный узел", all_gids, index=all_gids.index(default_gid), label_visibility="collapsed")
-row = nodes.loc[nodes[gid_col].map(gid_key) == selected_gid].iloc[0]
+if "selected_gid" not in st.session_state or st.session_state["selected_gid"] not in gid_set:
+    st.session_state["selected_gid"] = all_gids[0]
 
-left, right = st.columns([1.55, 1])
+st.subheader("Топ узлов для проверки")
+st.caption("Щёлкните строку, чтобы открыть карточку узла. Роль и приоритет — аналитические признаки.")
+if top_schema_ok:
+    top_view = top.rename(columns={"rank": "Ранг", "gid": "GID", "role": "Роль",
+                                   "priority_score": "Приоритет", "why": "Почему в топе"})
+    top_event = st.dataframe(
+        top_view[["Ранг", "GID", "Роль", "Приоритет", "Почему в топе"]],
+        hide_index=True, width="stretch", height=390, on_select="rerun",
+        selection_mode="single-row", key="top_nodes_table",
+    )
+    selected_rows = list(top_event.selection.rows)
+    previous_rows = st.session_state.get("_top_rows", [])
+    if selected_rows and selected_rows != previous_rows:
+        index = selected_rows[0]
+        if 0 <= index < len(top):
+            candidate = gid_key(top["gid"].iloc[index])
+            if candidate in gid_set:
+                st.session_state["selected_gid"] = candidate
+    st.session_state["_top_rows"] = selected_rows
+else:
+    st.info("Топ-лист недоступен: output/top_nodes.csv отсутствует, пуст или имеет неверную схему.")
+
+with st.sidebar:
+    st.header("Поиск узла")
+    with st.form("gid_search_form"):
+        search = st.text_input("GID из nodes_roles.csv", placeholder="Введите любой gid")
+        submitted = st.form_submit_button("Найти")
+    if submitted:
+        search_key = gid_key(search)
+        if search_key in gid_set:
+            st.session_state["selected_gid"] = search_key
+        else:
+            st.warning("Такой gid не найден в output/nodes_roles.csv.")
+    st.caption("Поиск работает и для узла без рёбер.")
+    st.selectbox("Выбранный узел", all_gids, key="selected_gid")
+
+selected_gid = st.session_state["selected_gid"]
+row = nodes.loc[nodes[gid_col].map(gid_key) == selected_gid].iloc[0]
+path_result = nearest_seed_path(graph, seed_ids, selected_gid) if graph is not None and seed_data_ok else None
+
+st.divider()
+left, right = st.columns([1.5, 1])
 with left:
-    st.subheader("Окрестность узла")
-    st.caption("Стрелка показывает направление потока; размер визуализации ограничен ближайшими связями.")
+    st.subheader("Направленное окружение")
+    st.caption(f"Выбранный узел {selected_gid} · кластер {gid_key(row[cluster_col])}")
     legend = "&nbsp;&nbsp;".join(
         f'<span style="color:{color}">●</span> {esc(role)}'
         for role, color in ROLE_COLORS.items() if role != "unknown"
     )
-    st.markdown(legend, unsafe_allow_html=True)
-    edges_path = DATA / "edges.parquet"
-    try:
-        edges = pd.read_parquet(edges_path) if edges_path.exists() else pd.DataFrame()
-    except Exception as exc:
-        edges = pd.DataFrame()
-        st.error(f"Ошибка чтения edges.parquet: {exc}")
-    edge_src = col(edges, ["src", "source", "from_gid"])
-    edge_dst = col(edges, ["dst", "target", "to_gid"])
-    edge_amount = col(edges, ["sum_kzt", "amount", "weight"])
-    edges_valid = bool(not edges.empty and edge_src and edge_dst and edge_amount)
-    if edges.empty:
-        if not edges_path.exists():
-            st.warning(f"Связи недоступны: не найден файл {edges_path}.")
-        else:
-            st.warning("data/edges.parquet пуст или не содержит строк.")
+    st.markdown(legend + ' &nbsp;&nbsp; <span style="color:#ff6b35">━</span> путь от seed', unsafe_allow_html=True)
+    if not edges_valid:
+        st.info("Направленный граф недоступен: нужны data/edges.parquet с колонками src, dst, sum_kzt.")
+        seed_path = None
+    elif not seed_data_ok:
+        st.warning("Путь от seed недоступен: в data/nodes.parquet нет подтверждённого списка gid и is_seed.")
+        seed_path = None
+    elif path_result is None:
+        st.warning("От seed до этого узла нет направленного пути в наблюдаемом графе.")
+        seed_path = None
     else:
-        if not edges_valid:
-            st.error("В data/edges.parquet ожидаются колонки src, dst и sum_kzt.")
+        seed, seed_path = path_result
+        if len(seed_path) == 1:
+            st.success(f"Выбранный узел {selected_gid} — seed.")
         else:
-            draw_graph(nodes, edges, selected_gid, gid_col, role_col, "Ближайшие направленные связи")
-src, dst = edge_src, edge_dst
+            st.success(f"Seed {seed} → {' → '.join(seed_path)} · {len(seed_path) - 1} рёбер. Путь выделен оранжевым.")
+    if edges_valid:
+        draw_graph(nodes, edges, selected_gid, gid_col, role_col,
+                   "Ближайшие связи и путь от seed", seed_path=seed_path)
+
 with right:
-    role = row.get(role_col, "unknown") if role_col else "unknown"
-    role_text = str(role)
-    color = next((v for k,v in ROLE_COLORS.items() if k in role_text.lower()), ROLE_COLORS["unknown"])
+    role_text = str(row[role_col])
+    color = ROLE_COLORS.get(role_text, ROLE_COLORS["unknown"])
     st.subheader(f"Узел {selected_gid}")
     st.markdown(f'<span class="pill" style="border:1px solid {color};color:{color}">{esc(role_text)}</span>', unsafe_allow_html=True)
-    a,b = st.columns(2)
-    a.metric("Role score", fmt(row.get(role_score_col)) if role_score_col else "—")
-    b.metric("Priority score", fmt(row.get(priority_score_col)) if priority_score_col else "—")
-    st.metric("Кластер", fmt(row.get(cluster_col)) if cluster_col else "—")
-    evidence_cols = [c for c in ["in_degree","out_degree","in_amount","out_amount","turnover","pass_ratio","score"] if c in row.index]
+    a, b = st.columns(2)
+    a.metric("Role score", fmt(row[role_score_col]))
+    b.metric("Priority score", fmt(row[priority_score_col]))
+    st.metric("Кластер", fmt(row[cluster_col]))
     st.markdown("**Evidence — признаки и гипотеза для проверки**")
-    st.write(row.get(evidence_col))
-    if evidence_cols:
-        st.dataframe(pd.DataFrame({"Признак": evidence_cols,"Значение":[fmt(row[c]) for c in evidence_cols]}), hide_index=True, width="stretch", height=240)
-    if top_schema_ok:
-        top_match = top.loc[top["gid"].map(gid_key) == selected_gid]
-        if not top_match.empty:
-            st.markdown("**В приоритетном списке**")
-            st.write(f"Ранг {fmt(top_match.iloc[0]['rank'])} · {top_match.iloc[0]['why']}")
-    st.markdown("**Входящие и исходящие связи**")
-    src = col(edges, ["src","source","from_gid"]); dst = col(edges, ["dst","target","to_gid"])
-    if edges_valid:
-        incoming = edges.loc[edges[dst].map(gid_key) == selected_gid]
-        outgoing = edges.loc[edges[src].map(gid_key) == selected_gid]
-        amt = edge_amount
-        tx = col(edges, ["n_tx","tx_count"])
-        def edge_table(frame, other):
-            result = pd.DataFrame({"gid":frame[other].astype(str)})
-            if amt: result["Сумма KZT"] = frame[amt].map(fmt)
-            if tx: result["Транзакций"] = frame[tx].map(fmt)
-            return result
-        c_in,c_out = st.columns(2)
-        c_in.caption(f"Входящие · {len(incoming)}")
-        c_in.dataframe(edge_table(incoming,src).head(8), hide_index=True, width="stretch", height=185)
-        c_out.caption(f"Исходящие · {len(outgoing)}")
-        c_out.dataframe(edge_table(outgoing,dst).head(8), hide_index=True, width="stretch", height=185)
+    st.write(row[evidence_col])
+    top_match = top.loc[top["gid"].map(gid_key) == selected_gid] if top_schema_ok else pd.DataFrame()
+    if not top_match.empty:
+        st.markdown("**В приоритетном списке**")
+        st.write(f"Ранг {fmt(top_match.iloc[0]['rank'])} · {top_match.iloc[0]['why']}")
 
-if cluster_col and pd.notna(row.get(cluster_col)):
+    if edges_valid:
+        incoming = edges.loc[edges[edge_dst].map(gid_key) == selected_gid]
+        outgoing = edges.loc[edges[edge_src].map(gid_key) == selected_gid]
+        tx_col = col(edges, ["n_tx", "tx_count"])
+        def edge_table(frame, other):
+            result = pd.DataFrame({"GID": frame[other].map(gid_key).values})
+            result["Сумма KZT"] = frame[edge_amount].map(fmt).values
+            if tx_col:
+                result["Транзакций"] = frame[tx_col].map(fmt).values
+            return result
+        st.markdown("**Входящие связи**")
+        st.dataframe(edge_table(incoming, edge_src).head(8), hide_index=True, width="stretch", height=190)
+        st.markdown("**Исходящие связи**")
+        st.dataframe(edge_table(outgoing, edge_dst).head(8), hide_index=True, width="stretch", height=190)
+        if incoming.empty and outgoing.empty:
+            st.info("У этого узла нет рёбер в наблюдаемой выборке.")
+    else:
+        st.info("Суммы связей недоступны: проверьте data/edges.parquet.")
+
+if pd.notna(row[cluster_col]):
     st.divider()
-    st.subheader(f"Кластер {row.get(cluster_col)}")
+    st.subheader(f"Кластер {gid_key(row[cluster_col])}")
     if clusters_schema_ok:
-        cluster_row = clusters.loc[clusters["cluster_id"].astype(str) == str(row[cluster_col])]
+        cluster_row = clusters.loc[clusters["cluster_id"].map(gid_key) == gid_key(row[cluster_col])]
         if cluster_row.empty:
             st.warning("Для cluster_id выбранного узла нет строки в clusters.csv.")
         else:
@@ -307,17 +411,20 @@ if cluster_col and pd.notna(row.get(cluster_col)):
             m1.metric("Узлов", fmt(info["n_nodes"]))
             m2.metric("Seed", fmt(info["n_seed"]))
             m3.metric("Внутренний оборот, KZT", fmt(info["sum_kzt_internal"]))
-            st.markdown("**Гипотеза по кластеру**")
+            st.markdown("**Гипотеза для проверки по кластеру**")
             st.write(info["hypothesis"])
             gids = parse_top_gids(info["top_gids"])
-            st.caption("Ключевые узлы кластера: " + (", ".join(gids) if gids else "не указаны"))
-            members = set(gids)
-            members.add(selected_gid)
-            member_nodes = nodes[nodes[gid_col].astype(str).isin(members)]
-            st.caption("Кластерный граф содержит выбранный узел и перечисленные top_gids — это ключевые узлы, не полный список участников.")
+            st.caption("Ключевые узлы: " + (", ".join(gids) if gids else "не указаны"))
+            members = set(gids) | {selected_gid}
+            member_nodes = nodes[nodes[gid_col].map(gid_key).isin(members)]
+            st.caption("Граф показывает выбранный узел и ключевые top_gids, а не полный состав кластера.")
             if edges_valid:
-                ce = edges[edges[src].astype(str).isin(members) & edges[dst].astype(str).isin(members)]
-                draw_graph(member_nodes, ce, selected_gid, gid_col, role_col,
-                           "Ключевые узлы кластера", selected_neighborhood=False, include_all_nodes=True)
+                cluster_edges = edges[edges[edge_src].map(gid_key).isin(members) & edges[edge_dst].map(gid_key).isin(members)]
+                draw_graph(member_nodes, cluster_edges, selected_gid, gid_col, role_col,
+                           "Рёбра между ключевыми узлами кластера",
+                           selected_neighborhood=False, include_all_nodes=True)
     else:
-        st.info("Описание кластера недоступно: output/clusters.csv отсутствует, пуст или имеет неверную схему.")
+        st.info("Описание кластера недоступно: output/clusters.csv отсутствует или имеет неверную схему.")
+
+with st.expander("Ограничения выборки"):
+    st.caption("Обход обрывается на четвёртом колене; входящие переводы seed неполны; в выборке учтены суммы от 5 000 KZT. Отсутствие ребра в этой выборке не доказывает отсутствие перевода вне наблюдаемых данных.")
